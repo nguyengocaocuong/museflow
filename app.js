@@ -446,7 +446,7 @@
       $('#workerTabJobs').classList.toggle('primary',isJobs);
       if(isJobs)renderWorkerJobs();
     };
-    const stLabel={claimed:'đã nhận',generating:'đang generate…',uploading:'đang upload…',done:'xong ✅',failed:'lỗi ❌',revoked:'bị thu hồi'};
+    const stLabel={claimed:'đã nhận',building:'đang dựng sơ đồ…',generating:'đang generate…',uploading:'đang upload…',done:'xong ✅',failed:'lỗi ❌',revoked:'bị thu hồi'};
     function renderWorkerJobs(){
       const hist=W.getHistory(),cur=W.getCurrentJobId();
       $('#workerJobCount').textContent=hist.length?`(${hist.length})`:'';

@@ -190,8 +190,107 @@
     throw err;
   }
 
+  // ---- simulate thumb nhỏ cho từng scene (dùng cho campaign) ----
+  function simulateThumb(label, kind) {
+    return new Promise((resolve) => {
+      const c = document.createElement('canvas');
+      c.width = 270; c.height = 480;
+      const g = c.getContext('2d');
+      const grad = g.createLinearGradient(0, 0, 270, 480);
+      if (kind === 'video') { grad.addColorStop(0, '#1a2a6c'); grad.addColorStop(1, '#b21f1f'); }
+      else { grad.addColorStop(0, '#134e5e'); grad.addColorStop(1, '#71b280'); }
+      g.fillStyle = grad; g.fillRect(0, 0, 270, 480);
+      g.fillStyle = 'rgba(255,255,255,0.92)'; g.textAlign = 'center';
+      g.font = 'bold 22px sans-serif';
+      g.fillText(kind.toUpperCase(), 135, 220);
+      g.font = '15px sans-serif';
+      g.fillText(String(label || '').slice(0, 26), 135, 250);
+      c.toBlob((b) => resolve(c), 'image/png');
+    });
+  }
+
+  // Ghép các thumb thành 1 ảnh tổng kết quả campaign
+  function compositeGrid(canvases, title) {
+    return new Promise((resolve) => {
+      const cols = 3, tw = 270, th = 480, pad = 10, headH = 50;
+      const rows = Math.ceil(canvases.length / cols) || 1;
+      const c = document.createElement('canvas');
+      c.width = cols * (tw + pad) + pad;
+      c.height = headH + rows * (th + pad) + pad;
+      const g = c.getContext('2d');
+      g.fillStyle = '#111'; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#fff'; g.textAlign = 'center'; g.font = 'bold 24px sans-serif';
+      g.fillText('SIMULATED CAMPAIGN — ' + String(title || '').slice(0, 40), c.width / 2, 34);
+      canvases.forEach((t, i) => {
+        const x = pad + (i % cols) * (tw + pad), y = headH + pad + Math.floor(i / cols) * (th + pad);
+        g.drawImage(t, x, y, tw, th);
+      });
+      c.toBlob((b) => resolve(b), 'image/png');
+    });
+  }
+
+  // ---- job campaign: nhận NGUYÊN workflow JSON, dựng sơ đồ như import ----
+  async function handleCampaignJob(job) {
+    const wf = (job.payload && job.payload.workflow) || {};
+    const scenes = Array.isArray(wf.scenes) ? wf.scenes : [];
+    const shortId = String(job.id).slice(0, 8);
+    state.currentJobId = job.id;
+    recordJob(job.id, { kind: 'campaign', sceneName: `${wf.name || 'Campaign'} (${scenes.length} scenes)`,
+      status: 'claimed', startedAt: Date.now(), finishedAt: null, error: null, resultUrl: null });
+    log(`Nhận campaign "${wf.name || ''}" — ${scenes.length} scenes.`);
+    const stopFlag = { stopped: false, gone: false };
+    const hb = heartbeatLoop(job.id, stopFlag);
+    try {
+      // 1. Dựng sơ đồ flow trên canvas — y hệt lúc bấm JSON → Flow
+      recordJob(job.id, { status: 'building' });
+      if (window.__museflowHooks && window.__museflowHooks.buildJsonFlow) {
+        window.__museflowHooks.buildJsonFlow(JSON.stringify(wf));
+        log('Đã dựng sơ đồ flow trên canvas (nodes + dây nối + Timeline).');
+      } else {
+        log('⚠ Không tìm thấy hook buildJsonFlow — mở app page mới nhất.');
+      }
+      if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+      if (state.cfg.simulate) {
+        // 2. Giả lập generate từng scene
+        recordJob(job.id, { status: 'generating' });
+        const thumbs = [];
+        for (const s of scenes) {
+          if (s.imagePrompt) thumbs.push(await simulateThumb(s.name, 'image'));
+          if (s.videoPrompt) thumbs.push(await simulateThumb(s.name, 'video'));
+          await sleep(400);
+        }
+        if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+        // 3. Upload 1 ảnh tổng
+        recordJob(job.id, { status: 'uploading' });
+        const blob = await compositeGrid(thumbs, wf.name);
+        const up = await uploadResult(job, blob, { kind: 'campaign', simulated: 'true', scenes: String(scenes.length) });
+        recordJob(job.id, { status: 'done', finishedAt: Date.now(),
+          resultUrl: state.cfg.serverUrl.replace(/\/+$/, '') + (up.fileUrl || '') });
+        log(`✅ Campaign xong — ${thumbs.length} placeholders, đã upload ảnh tổng.`);
+      } else {
+        recordJob(job.id, { status: 'generating' });
+        log('Real mode: sơ đồ đã dựng, bấm Run tay trên canvas. Bắt kết quả bridge = TODO P1.');
+        const err = new Error('RESULT_CAPTURE_TODO'); err.code = 'RESULT_CAPTURE_TODO'; throw err;
+      }
+    } catch (e) {
+      if (e.code === 'RESULT_CAPTURE_TODO') {
+        await failJob(job, 'RESULT_CAPTURE_TODO', 'Real bridge result capture chưa code (P1). Sơ đồ đã dựng trên canvas.', false);
+        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: 'RESULT_CAPTURE_TODO' });
+      } else {
+        log('❌ Lỗi campaign: ' + e.message);
+        await failJob(job, 'UNKNOWN', e.message || 'worker error', true);
+        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
+      }
+    } finally {
+      state.currentJobId = null;
+      stopFlag.stopped = true;
+      await hb.catch(() => {});
+    }
+  }
+
   async function handleJob(job) {
     const kind = (job.payload && job.payload.kind) || '?';
+    if (kind === 'campaign') return handleCampaignJob(job);
     const sname = ((job.payload && job.payload.scene) || {}).name || '';
     const shortId = String(job.id).slice(0, 8);
     state.currentJobId = job.id;
