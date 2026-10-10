@@ -170,6 +170,13 @@
     return r.json();
   }
 
+  // Mô tả lỗi từng node để debug (log vào worker + fail message)
+  function describeFailures(items) {
+    return items.filter((i) => !(i.status === 'success' && i.url))
+      .map((i) => `${i.sceneName}[${i.kind}](${i.status}): ${i.error || 'no asset'}`)
+      .join(' | ');
+  }
+
   // ---- real mode: chạy thật qua bridge, gom kết quả từng node ----
   function needHooks() {
     if (!(window.__museflowHooks && window.__museflowHooks.buildJsonFlow && window.__museflowHooks.runAndCapture))
@@ -313,7 +320,11 @@
         if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
         recordJob(job.id, { status: 'uploading' });
         const res = await uploadCapturedItems(job, items);
-        if (res.succeeded === 0) throw Object.assign(new Error('Không có node nào generate thành công.'), { code: 'ALL_FAILED' });
+        if (res.succeeded === 0) {
+          const detail = describeFailures(items);
+          log('Chi tiết node lỗi: ' + detail);
+          throw Object.assign(new Error('Không có node nào generate thành công. ' + detail), { code: 'ALL_FAILED' });
+        }
         recordJob(job.id, { status: 'done', finishedAt: Date.now(), resultUrl: null });
         log(`✅ Campaign thật xong — ${res.succeeded} files đã upload${res.failed ? `, ${res.failed} node lỗi` : ''} (xem trên web UI server).`);
       }
@@ -368,7 +379,11 @@
         recordJob(job.id, { status: 'uploading' });
         const res = await uploadCapturedItems(job, items);
         uploaded = res.succeeded; failedNodes = res.failed;
-        if (uploaded === 0) throw Object.assign(new Error('Không có node nào generate thành công.'), { code: 'ALL_FAILED' });
+        if (uploaded === 0) {
+          const detail = describeFailures(items);
+          log('Chi tiết node lỗi: ' + detail);
+          throw Object.assign(new Error('Không có node nào generate thành công. ' + detail), { code: 'ALL_FAILED' });
+        }
       }
       recordJob(job.id, { status: 'done', finishedAt: Date.now(), resultUrl: singleResultUrl });
       log(`✅ Upload xong job ${shortId} — ${uploaded} file${failedNodes ? `, ${failedNodes} node lỗi` : ''} (xem trên web UI server)`);
