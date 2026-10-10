@@ -154,6 +154,11 @@
     <section class="modal script-modal" role="dialog" aria-modal="true" aria-labelledby="workerModalTitle">
       <h2 id="workerModalTitle">Generation Worker — nhận job từ rup-video Brain</h2>
       <p>Worker poll job <code>muse_generate</code> từ server, generate (hoặc giả lập), rồi upload kết quả về. Session Muse.ai không bao giờ rời máy bạn.</p>
+      <div style="margin:8px 0">
+        <button id="workerTabCfg" type="button" class="primary">Cấu hình</button>
+        <button id="workerTabJobs" type="button">Jobs <span id="workerJobCount"></span></button>
+      </div>
+      <div id="workerCfgPane">
       <div class="row" style="display:flex;gap:12px">
         <div style="flex:2">
           <label for="workerServerUrl">Server URL</label>
@@ -180,6 +185,20 @@
       <div id="workerStatus" role="status"></div>
       <label for="workerLog">Log</label>
       <textarea id="workerLog" readonly style="height:140px;font-family:monospace;font-size:11px"></textarea>
+      </div><!-- /workerCfgPane -->
+      <div id="workerJobsPane" class="hidden">
+        <div class="modal-actions" style="justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:12px;color:#888">Jobs worker này đã nhận (click 1 dòng để xem chi tiết)</span>
+          <span><button id="workerJobsRefresh" type="button">Refresh</button></span>
+        </div>
+        <div style="max-height:220px;overflow:auto">
+        <table style="width:100%;font-size:12px;border-collapse:collapse">
+          <thead><tr><th style="text-align:left">Job</th><th style="text-align:left">Scene</th><th style="text-align:left">Trạng thái</th></tr></thead>
+          <tbody id="workerJobsBody"></tbody>
+        </table>
+        </div>
+        <div id="workerJobDetail" style="margin-top:10px;font-size:12px"></div>
+      </div>
     </section>
   </div>
 

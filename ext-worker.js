@@ -57,8 +57,41 @@
     timer: 0,
     logLines: [],
     onLog: null,       // UI hook: (line) => void
+    onJobs: null,      // UI hook: () => void (job history thay đổi)
     busy: false,       // đang xử lý 1 job
+    history: [],       // [{id,kind,sceneName,status,startedAt,finishedAt,error,resultUrl}]
+    currentJobId: null,
   };
+  const HIST_KEY = 'extWorkerHistory';
+
+  async function loadHistory() {
+    try {
+      if (window.chrome && chrome.storage && chrome.storage.local) {
+        const r = await chrome.storage.local.get(HIST_KEY);
+        state.history = (r[HIST_KEY] || []).slice(-50);
+        return;
+      }
+    } catch (e) {}
+    try { state.history = JSON.parse(localStorage.getItem(HIST_KEY) || '[]').slice(-50); } catch (e) {}
+  }
+  async function saveHistory() {
+    const h = state.history.slice(-50);
+    try {
+      if (window.chrome && chrome.storage && chrome.storage.local) {
+        await chrome.storage.local.set({ [HIST_KEY]: h });
+        return;
+      }
+    } catch (e) {}
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(h)); } catch (e) {}
+  }
+  function recordJob(id, patch) {
+    let rec = state.history.find((x) => x.id === id);
+    if (!rec) { rec = { id }; state.history.push(rec); }
+    Object.assign(rec, patch);
+    state.history = state.history.slice(-50);
+    saveHistory();
+    if (state.onJobs) { try { state.onJobs(); } catch (e) {} }
+  }
 
   function log(msg) {
     const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -160,32 +193,43 @@
   async function handleJob(job) {
     const kind = (job.payload && job.payload.kind) || '?';
     const sname = ((job.payload && job.payload.scene) || {}).name || '';
-    log(`Claimed job ${String(job.id).slice(0, 8)} [${kind}] "${sname}" (simulate=${state.cfg.simulate})`);
+    const shortId = String(job.id).slice(0, 8);
+    state.currentJobId = job.id;
+    recordJob(job.id, { kind, sceneName: sname, status: 'claimed', startedAt: Date.now(), finishedAt: null, error: null, resultUrl: null });
+    log(`Claimed job ${shortId} [${kind}] "${sname}" (simulate=${state.cfg.simulate})`);
     const stopFlag = { stopped: false, gone: false };
     const hb = heartbeatLoop(job.id, stopFlag);
     try {
       let blob, meta;
       if (state.cfg.simulate) {
+        recordJob(job.id, { status: 'generating' });
         await sleep(4000); // giả lập thời gian generate
         const sim = await simulateImage(job);
         blob = sim.blob;
         meta = { width: sim.width, height: sim.height, kind, simulated: 'true',
                  durationSec: ((job.payload && job.payload.scene) || {}).duration || '' };
       } else {
+        recordJob(job.id, { status: 'generating' });
         await realGenerate(job); // throw RESULT_CAPTURE_TODO
       }
-      if (stopFlag.gone) { log('Job bị server thu hồi giữa chừng — bỏ kết quả.'); return; }
-      await uploadResult(job, blob, meta);
-      log(`✅ Upload xong job ${String(job.id).slice(0, 8)} (${(blob.size / 1024).toFixed(1)} KB)`);
+      if (stopFlag.gone) { log('Job bị server thu hồi giữa chừng — bỏ kết quả.'); recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+      recordJob(job.id, { status: 'uploading' });
+      const up = await uploadResult(job, blob, meta);
+      recordJob(job.id, { status: 'done', finishedAt: Date.now(),
+        resultUrl: state.cfg.serverUrl.replace(/\/+$/, '') + (up.fileUrl || '') });
+      log(`✅ Upload xong job ${shortId} (${(blob.size / 1024).toFixed(1)} KB)`);
     } catch (e) {
       if (e.code === 'RESULT_CAPTURE_TODO') {
         log('Real mode: flow đã build, chờ P1 nối bridge result capture.');
         await failJob(job, 'RESULT_CAPTURE_TODO', 'Real bridge result capture chưa code (P1). Flow đã build trên canvas.', false);
+        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: 'RESULT_CAPTURE_TODO' });
       } else {
         log('❌ Lỗi job: ' + e.message);
         await failJob(job, 'UNKNOWN', e.message || 'worker error', true);
+        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
       }
     } finally {
+      state.currentJobId = null;
       stopFlag.stopped = true;
       await hb.catch(() => {});
     }
@@ -218,7 +262,7 @@
   }
 
   const Worker = {
-    async init() { state.cfg = await store.get(); return state.cfg; },
+    async init() { state.cfg = await store.get(); await loadHistory(); return state.cfg; },
     get config() { return state.cfg; },
     async saveConfig(cfg) {
       state.cfg = Object.assign({}, state.cfg, cfg);
@@ -248,7 +292,16 @@
       log('Worker STOP.');
     },
     onLog(fn) { state.onLog = fn; },
+    onJobs(fn) { state.onJobs = fn; },
     getLog() { return state.logLines.slice(); },
+    getHistory() { return state.history.slice().reverse(); },
+    getCurrentJobId() { return state.currentJobId; },
+    async fetchServerJobs() {
+      const r = await api('/api/ext/v1/jobs');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    },
+    serverBase() { return state.cfg.serverUrl.replace(/\/+$/, ''); },
   };
 
   window.ExtWorker = Worker;

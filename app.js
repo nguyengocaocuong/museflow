@@ -431,6 +431,51 @@
       $('#jsonAutoRun').checked=false; // worker real-mode: build thôi, không auto-run
       try{buildNodesFromJson();}finally{$('#jsonAutoRun').checked=keepAuto;}
     };
+    initWorkerJobsTab();
+  }
+
+  /* ---- Worker Jobs tab: xem job đang chạy / đã nhận ---- */
+  function initWorkerJobsTab(){
+    const W=window.ExtWorker;if(!W)return;
+    const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const showTab=(which)=>{
+      const isJobs=which==='jobs';
+      $('#workerCfgPane').classList.toggle('hidden',isJobs);
+      $('#workerJobsPane').classList.toggle('hidden',!isJobs);
+      $('#workerTabCfg').classList.toggle('primary',!isJobs);
+      $('#workerTabJobs').classList.toggle('primary',isJobs);
+      if(isJobs)renderWorkerJobs();
+    };
+    const stLabel={claimed:'đã nhận',generating:'đang generate…',uploading:'đang upload…',done:'xong ✅',failed:'lỗi ❌',revoked:'bị thu hồi'};
+    function renderWorkerJobs(){
+      const hist=W.getHistory(),cur=W.getCurrentJobId();
+      $('#workerJobCount').textContent=hist.length?`(${hist.length})`:'';
+      const tb=$('#workerJobsBody');tb.innerHTML='';
+      hist.forEach((h)=>{
+        const tr=document.createElement('tr');
+        tr.style.cursor='pointer';
+        if(h.id===cur)tr.style.background='rgba(43,127,255,.18)';
+        const el=(h.finishedAt&&h.startedAt)?` (${Math.round((h.finishedAt-h.startedAt)/1000)}s)`:'';
+        tr.innerHTML=`<td><code>${esc(String(h.id).slice(0,8))}</code> [${esc(h.kind||'?')}]</td><td>${esc(h.sceneName||'')}</td><td>${esc(stLabel[h.status]||h.status)}${el}</td>`;
+        tr.onclick=()=>{
+          const d=$('#workerJobDetail');
+          const img=h.resultUrl?`<br><img src="${esc(h.resultUrl)}" style="max-width:220px;border-radius:6px;margin-top:6px" alt="result">`:'';
+          const err=h.error?`<br><span style="color:#e74c3c">Lỗi: ${esc(h.error)}</span>`:'';
+          d.innerHTML=`<b>${esc(h.sceneName||'(không tên)')}</b> <code>${esc(String(h.id).slice(0,8))}</code> [${esc(h.kind||'?')}]${err}${img}`;
+        };
+        tb.appendChild(tr);
+      });
+      if(!hist.length)tb.innerHTML='<tr><td colspan="3" style="color:#888">Chưa nhận job nào — bấm Start worker rồi Enqueue job trên web UI của server.</td></tr>';
+    }
+    $('#workerTabCfg').onclick=()=>showTab('cfg');
+    $('#workerTabJobs').onclick=()=>showTab('jobs');
+    $('#workerJobsRefresh').onclick=renderWorkerJobs;
+    W.onJobs(()=>{if(!$('#workerJobsPane').classList.contains('hidden'))renderWorkerJobs();});
+    setInterval(()=>{
+      if(!$('#workerModal').classList.contains('hidden')&&!$('#workerJobsPane').classList.contains('hidden'))renderWorkerJobs();
+    },3000);
+    const origWorkerBtn=$('#workerBtn').onclick;
+    $('#workerBtn').onclick=()=>{if(origWorkerBtn)origWorkerBtn();showTab('cfg');};
   }
 
   function loadJsonFile(file){
