@@ -243,9 +243,10 @@
     try {
       // 1. Dựng sơ đồ flow trên canvas — y hệt lúc bấm JSON → Flow
       recordJob(job.id, { status: 'building' });
+      const autoRun = (job.payload && job.payload.autoRun) !== false; // mặc định true
       if (window.__museflowHooks && window.__museflowHooks.buildJsonFlow) {
-        window.__museflowHooks.buildJsonFlow(JSON.stringify(wf));
-        log('Đã dựng sơ đồ flow trên canvas (nodes + dây nối + Timeline).');
+        window.__museflowHooks.buildJsonFlow(JSON.stringify(wf), { autoRun });
+        log(`Đã dựng sơ đồ flow trên canvas${autoRun ? ' và auto-run' : ''}.`);
       } else {
         log('⚠ Không tìm thấy hook buildJsonFlow — mở app page mới nhất.');
       }

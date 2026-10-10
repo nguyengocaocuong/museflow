@@ -423,12 +423,12 @@
       syncToggle();
     };
     syncToggle();
-    // Hook cho worker real-mode: build flow từ job.scene
+    // Hook cho worker: build flow từ job (campaign). opts.autoRun=true → chạy luôn như import tay.
     window.__museflowHooks=window.__museflowHooks||{};
-    window.__museflowHooks.buildJsonFlow=(jsonText)=>{
+    window.__museflowHooks.buildJsonFlow=(jsonText,opts)=>{
       $('#jsonInput').value=jsonText;
       const keepAuto=$('#jsonAutoRun').checked;
-      $('#jsonAutoRun').checked=false; // worker real-mode: build thôi, không auto-run
+      if(opts&&typeof opts.autoRun==='boolean')$('#jsonAutoRun').checked=opts.autoRun;
       try{buildNodesFromJson();}finally{$('#jsonAutoRun').checked=keepAuto;}
     };
     initWorkerJobsTab();
