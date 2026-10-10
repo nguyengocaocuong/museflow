@@ -434,8 +434,10 @@
     // Hook cho worker real-mode: chạy workflow và gom kết quả từng node generate.
     // Trả về [{nodeId, sceneName, kind, status, error, url, width, height}].
     // execute() không reject khi lỗi node — node lỗi có status='error'.
+    // Nếu flow đang chạy dở (vd user bấm Run tay), đợi nó xong mới gom.
     window.__museflowHooks.runAndCapture=async()=>{
       await executeWorkflow();
+      while(state.isRunning){await new Promise(r=>setTimeout(r,1000));}
       const items=[];
       for(const n of state.nodes){
         if(!['generateImage','generateVideo'].includes(n.type))continue;
