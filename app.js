@@ -269,6 +269,133 @@
     setRunStatus(`Created ${scenes.length} scenes · ${made} nodes · ${createdVideos.length} video clips ordered on the Timeline.`,'ok');
   }
 
+  // ---------- JSON → Flow (auto build + optional auto run) ----------
+  // Pure function: parse + validate a workflow JSON. No DOM access, unit-testable.
+  // Schema:
+  // {
+  //   "name": "Campaign name",
+  //   "autoRun": true,                       // default true
+  //   "negativePrompt": "blurry, ...",       // workflow-level, scenes can override
+  //   "scenes": [
+  //     { "name": "Scene 1 - Hook",
+  //       "imagePrompt": "...",              // optional if videoPrompt present
+  //       "videoPrompt": "...",              // optional if imagePrompt present
+  //       "negativePrompt": "...",           // optional, overrides workflow-level
+  //       "size": "9:16",                    // 9:16 | 16:9 | 1:1 | 4:3 | 3:4
+  //       "duration": 5 }                    // seconds, snapped to 5/6/8/10
+  //   ]
+  // }
+  function parseWorkflowJson(text){
+    let parsed;
+    try{ parsed=JSON.parse(text); }
+    catch(error){ throw new Error('Invalid JSON: '+error.message); }
+    if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))
+      throw new Error('JSON must be an object with a "scenes" array.');
+    const scenes=parsed.scenes;
+    if(!Array.isArray(scenes)||!scenes.length)
+      throw new Error('No scenes found. Add a "scenes" array with at least one scene.');
+    const workflowNegative=typeof parsed.negativePrompt==='string'?parsed.negativePrompt.trim():'';
+    const normalized=scenes.map((scene,index)=>{
+      const label=`Scene ${index+1}`;
+      if(!scene||typeof scene!=='object') throw new Error(`${label} must be an object.`);
+      const imagePrompt=String(scene.imagePrompt||'').trim();
+      const videoPrompt=String(scene.videoPrompt||'').trim();
+      if(!imagePrompt&&!videoPrompt)
+        throw new Error(`${label} ("${String(scene.name||'unnamed')}") needs "imagePrompt" or "videoPrompt".`);
+      const size=/^(9:16|16:9|1:1|4:3|3:4)$/.test(String(scene.size||''))?String(scene.size):'9:16';
+      const seconds=Number(scene.duration)||5;
+      const duration=[5,6,8,10].reduce((best,value)=>Math.abs(value-seconds)<Math.abs(best-seconds)?value:best,5);
+      return {
+        name:String(scene.name||label).trim()||label,
+        imagePrompt, videoPrompt,
+        negativePrompt:typeof scene.negativePrompt==='string'&&scene.negativePrompt.trim()?scene.negativePrompt.trim():workflowNegative,
+        size, duration
+      };
+    });
+    return {
+      name:String(parsed.name||'JSON workflow').trim()||'JSON workflow',
+      autoRun:parsed.autoRun!==false,
+      scenes:normalized
+    };
+  }
+
+  function buildNodesFromJson(){
+    const status=$('#jsonImportStatus');
+    let workflow;
+    try{ workflow=parseWorkflowJson($('#jsonInput').value); }
+    catch(error){ status.className='error'; status.textContent=error.message; return; }
+    createUndoSnapshot(`Build flow from JSON: ${workflow.name}`);
+    const visible=state.nodes.filter(node=>!node.data?.dockOnly);
+    const baseY=Math.max(40,...visible.map(node=>node.y+360));
+    const createdVideos=[];let made=0;
+    workflow.scenes.forEach((scene,index)=>{
+      const column=index%4,row=Math.floor(index/4),x=80+column*650,y=baseY+row*1100,label=scene.name;
+      let imageNode=null,videoNode=null;
+      if(scene.negativePrompt&&(scene.imagePrompt||scene.videoPrompt)){
+        const negative=makeNode('negativePrompt',x,y+270);
+        negative.data={text:scene.negativePrompt,sceneLabel:label};
+        state.nodes.push(negative);made++;
+        scene._negativeNode=negative;
+      }
+      const linkNegative=(genNode)=>{
+        if(!scene._negativeNode)return;
+        state.edges.push({id:uid('edge'),source:scene._negativeNode.id,sourcePort:'negative',target:genNode.id,targetPort:'negative'});
+      };
+      if(scene.imagePrompt){
+        const prompt=makeNode('prompt',x,y);prompt.data={text:scene.imagePrompt,sceneLabel:label};
+        const image=makeNode('generateImage',x+330,y);
+        image.data={model:'muse-image',size:scene.size,status:'idle',sceneLabel:label};
+        state.nodes.push(prompt,image);
+        state.edges.push({id:uid('edge'),source:prompt.id,sourcePort:'text',target:image.id,targetPort:'prompt'});
+        linkNegative(image);imageNode=image;made+=2;
+      }
+      if(scene.videoPrompt){
+        const vy=scene.imagePrompt?y+540:y;
+        const prompt=makeNode('prompt',x,vy);prompt.data={text:scene.videoPrompt,sceneLabel:label};
+        videoNode=makeNode('generateVideo',x+330,vy);
+        videoNode.data={model:'muse-video',size:scene.size,duration:scene.duration,continuity:createdVideos.length>0,status:'idle',sceneLabel:label};
+        state.nodes.push(prompt,videoNode);
+        state.edges.push({id:uid('edge'),source:prompt.id,sourcePort:'text',target:videoNode.id,targetPort:'prompt'});
+        linkNegative(videoNode);
+        if(imageNode)state.edges.push({id:uid('edge'),source:imageNode.id,sourcePort:'image',target:videoNode.id,targetPort:'reference'});
+        made+=2;createdVideos.push({node:videoNode,seconds:scene.duration});
+      }
+      delete scene._negativeNode;
+    });
+    let references=state.nodes.find(node=>node.type==='references');
+    if(!references){
+      const minX=Math.min(80,...state.nodes.filter(node=>!node.data?.dockOnly).map(node=>node.x));
+      references=makeNode('references',minX-360,baseY);references.data={};state.nodes.push(references);made++;
+    }
+    syncReferenceFanOut(references);
+    const timeline=ensureDockTimeline();
+    timeline.data.clipOrder=createdVideos.map(item=>item.node.id);
+    timeline.data.durations=timeline.data.durations||{};
+    createdVideos.forEach(({node,seconds})=>{timeline.data.durations[node.id]=seconds;});
+    $('#jsonModal').classList.add('hidden');render();saveState();
+    if($('#timelineDock').classList.contains('collapsed'))toggleTimeline();
+    const shouldRun=$('#jsonAutoRun').checked&&workflow.autoRun;
+    setRunStatus(`Built "${workflow.name}": ${workflow.scenes.length} scenes · ${made} nodes · ${createdVideos.length} video clips on the Timeline.${shouldRun?' Starting run…':''}`,'ok');
+    if(shouldRun)executeWorkflow();
+  }
+
+  function loadJsonFile(file){
+    const status=$('#jsonImportStatus');
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=()=>{
+      $('#jsonInput').value=String(reader.result||'');
+      try{
+        const workflow=parseWorkflowJson($('#jsonInput').value);
+        $('#jsonAutoRun').checked=workflow.autoRun;
+        status.className='ok';
+        status.textContent=`Loaded "${workflow.name}": ${workflow.scenes.length} scene(s). Review the JSON, then Build flow.`;
+      }catch(error){ status.className='error'; status.textContent=error.message; }
+    };
+    reader.onerror=()=>{ status.className='error'; status.textContent='Could not read the file.'; };
+    reader.readAsText(file);
+  }
+
   function screenToCanvas(x,y){const rect=$('#viewport').getBoundingClientRect();return{x:x-rect.left,y:y-rect.top};}
 
   function startWire(e,nodeId,portId){
@@ -1165,6 +1292,11 @@
   $('#scriptImportBtn').onclick=()=>{$('#scriptModal').classList.remove('hidden');$('#scriptImportStatus').textContent='';$('#scriptInput').focus();};
   $('#cancelScriptImport').onclick=()=>$('#scriptModal').classList.add('hidden');
   $('#buildScriptNodes').onclick=buildSceneNodesFromScript;
+  $('#jsonImportBtn').onclick=()=>{$('#jsonModal').classList.remove('hidden');$('#jsonImportStatus').textContent='';$('#jsonInput').focus();};
+  $('#cancelJsonImport').onclick=()=>$('#jsonModal').classList.add('hidden');
+  $('#jsonFileBtn').onclick=()=>$('#jsonFileInput').click();
+  $('#jsonFileInput').onchange=(event)=>{loadJsonFile(event.target.files[0]);event.target.value='';};
+  $('#buildJsonNodes').onclick=buildNodesFromJson;
   $('#scriptModal').onclick=event=>{if(event.target.id==='scriptModal')$('#scriptModal').classList.add('hidden');};
   $('#scriptInput').addEventListener('input',()=>{const count=parseSceneScript($('#scriptInput').value).length;$('#scriptImportStatus').className='';$('#scriptImportStatus').textContent=count?`${count} scene${count===1?'':'s'} detected.`:'';});
   $('#timelineToggleBtn').onclick=toggleTimeline;
