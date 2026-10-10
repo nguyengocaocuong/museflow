@@ -7,9 +7,9 @@
  *   - simulate=true  (mặc định): KHÔNG chạm bridge thật. Vẽ ảnh placeholder bằng
  *                      canvas, đợi vài giây, upload binary thật về server.
  *                      Dùng để test toàn bộ vòng tròn API.
- *   - simulate=false: build flow thật từ job.scene qua JSON→Flow (cần tab Muse.ai
- *                      login), nhưng phần "bắt kết quả generate để upload" CHƯA CODE
- *                      (P1) → job fail với mã RESULT_CAPTURE_TODO.
+ *   - simulate=false: build flow thật từ job, chạy qua tab Muse.ai đã login
+ *                      (runAndCapture hook), gom từng asset (node.data.asset.url)
+ *                      và upload về server. Campaign dài có thể mất hàng chục phút.
  *
  * API khớp docs/28-kien-truc-brain-worker.md (rup-video).
  */
@@ -170,24 +170,60 @@
     return r.json();
   }
 
-  // ---- real mode: build flow thật (kết quả capture = TODO P1) ----
+  // ---- real mode: chạy thật qua bridge, gom kết quả từng node ----
+  function needHooks() {
+    if (!(window.__museflowHooks && window.__museflowHooks.buildJsonFlow && window.__museflowHooks.runAndCapture))
+      throw Object.assign(new Error('App page chưa sẵn sàng — mở extension bản mới nhất.'), { code: 'HOOK_MISSING' });
+  }
+
+  async function fetchAssetBlob(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('fetch asset HTTP ' + r.status);
+    return r.blob();
+  }
+
+  // Upload từng asset thật lên server, rồi báo complete. Trả về {succeeded, failed}.
+  async function uploadCapturedItems(job, items) {
+    const okItems = items.filter((i) => i.status === 'success' && i.url);
+    const badItems = items.filter((i) => !(i.status === 'success' && i.url));
+    let n = 0;
+    for (const it of okItems) {
+      const blob = await fetchAssetBlob(it.url);
+      const ext = it.kind === 'video' ? 'mp4' : 'png';
+      const safeName = String(it.sceneName || it.nodeId).replace(/[^\w\-]+/g, '_').slice(0, 30);
+      const fd = new FormData();
+      fd.append('file', blob, `${String(job.id).slice(0, 8)}-${safeName}.${ext}`);
+      fd.append('kind', it.kind);
+      fd.append('sceneName', it.sceneName);
+      fd.append('nodeId', it.nodeId);
+      fd.append('width', it.width || '');
+      fd.append('height', it.height || '');
+      const r = await api(`/api/ext/v1/jobs/${job.id}/result`, { method: 'POST', body: fd });
+      if (!r.ok) throw new Error('upload HTTP ' + r.status);
+      n++;
+      log(`  ↑ ${n}/${okItems.length}: ${it.sceneName} [${it.kind}] (${(blob.size / 1024).toFixed(0)} KB)`);
+    }
+    await api(`/api/ext/v1/jobs/${job.id}/result/complete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ total: items.length, succeeded: n,
+        failed: badItems.map((i) => ({ sceneName: i.sceneName, kind: i.kind, error: i.error })) }),
+    });
+    return { succeeded: n, failed: badItems.length };
+  }
+
+  // ---- real mode cho job đơn lẻ: dựng flow 1 scene → chạy thật → upload ----
   async function realGenerate(job) {
     const scene = (job.payload && job.payload.scene) || {};
+    needHooks();
     const wf = {
       name: 'Worker job ' + String(job.id).slice(0, 8),
-      autoRun: false, // build thôi, user bấm run tay (tránh chạy ồ ạt)
+      autoRun: false,
       negativePrompt: scene.negativePrompt || '',
       scenes: [Object.assign({ name: scene.name || 'Scene' }, scene)],
     };
-    if (window.__museflowHooks && window.__museflowHooks.buildJsonFlow) {
-      window.__museflowHooks.buildJsonFlow(JSON.stringify(wf));
-      log('Đã build flow từ job (real mode). Bấm Run tay trên canvas.');
-    } else {
-      log('Không tìm thấy hook buildJsonFlow — mở app page mới nhất.');
-    }
-    const err = new Error('RESULT_CAPTURE_TODO');
-    err.code = 'RESULT_CAPTURE_TODO';
-    throw err;
+    window.__museflowHooks.buildJsonFlow(JSON.stringify(wf), { autoRun: false });
+    log('Đã dựng sơ đồ. Đang chạy thật qua tab Muse.ai — có thể mất vài phút, giữ tab mở.');
+    return window.__museflowHooks.runAndCapture();
   }
 
   // ---- simulate thumb nhỏ cho từng scene (dùng cho campaign) ----
@@ -269,19 +305,27 @@
           resultUrl: state.cfg.serverUrl.replace(/\/+$/, '') + (up.fileUrl || '') });
         log(`✅ Campaign xong — ${thumbs.length} placeholders, đã upload ảnh tổng.`);
       } else {
+        // REAL MODE: chạy thật qua bridge, gom từng asset, upload về server
+        needHooks();
         recordJob(job.id, { status: 'generating' });
-        log('Real mode: sơ đồ đã dựng, bấm Run tay trên canvas. Bắt kết quả bridge = TODO P1.');
-        const err = new Error('RESULT_CAPTURE_TODO'); err.code = 'RESULT_CAPTURE_TODO'; throw err;
+        log('Đã dựng sơ đồ. Đang chạy thật qua tab Muse.ai — campaign dài có thể mất hàng chục phút, giữ tab mở.');
+        const items = await window.__museflowHooks.runAndCapture();
+        if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+        recordJob(job.id, { status: 'uploading' });
+        const res = await uploadCapturedItems(job, items);
+        if (res.succeeded === 0) throw Object.assign(new Error('Không có node nào generate thành công.'), { code: 'ALL_FAILED' });
+        recordJob(job.id, { status: 'done', finishedAt: Date.now(), resultUrl: null });
+        log(`✅ Campaign thật xong — ${res.succeeded} files đã upload${res.failed ? `, ${res.failed} node lỗi` : ''} (xem trên web UI server).`);
       }
     } catch (e) {
-      if (e.code === 'RESULT_CAPTURE_TODO') {
-        await failJob(job, 'RESULT_CAPTURE_TODO', 'Real bridge result capture chưa code (P1). Sơ đồ đã dựng trên canvas.', false);
-        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: 'RESULT_CAPTURE_TODO' });
+      if (e.code === 'HOOK_MISSING') {
+        log('❌ ' + e.message);
+        await failJob(job, 'HOOK_MISSING', e.message, false);
       } else {
         log('❌ Lỗi campaign: ' + e.message);
-        await failJob(job, 'UNKNOWN', e.message || 'worker error', true);
-        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
+        await failJob(job, e.code || 'UNKNOWN', e.message || 'worker error', true);
       }
+      recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
     } finally {
       state.currentJobId = null;
       stopFlag.stopped = true;
@@ -300,32 +344,42 @@
     const stopFlag = { stopped: false, gone: false };
     const hb = heartbeatLoop(job.id, stopFlag);
     try {
-      let blob, meta;
+      let uploaded = 0, failedNodes = 0, singleResultUrl = null;
       if (state.cfg.simulate) {
         recordJob(job.id, { status: 'generating' });
         await sleep(4000); // giả lập thời gian generate
         const sim = await simulateImage(job);
-        blob = sim.blob;
-        meta = { width: sim.width, height: sim.height, kind, simulated: 'true',
+        const blob = sim.blob;
+        const meta = { width: sim.width, height: sim.height, kind, simulated: 'true',
                  durationSec: ((job.payload && job.payload.scene) || {}).duration || '' };
+        if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+        recordJob(job.id, { status: 'uploading' });
+        const up = await uploadResult(job, blob, meta); // single-file (giữ tương thích mock)
+        await api(`/api/ext/v1/jobs/${job.id}/result/complete`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ total: 1, succeeded: 1, failed: [] }),
+        });
+        uploaded = 1;
+        singleResultUrl = state.cfg.serverUrl.replace(/\/+$/, '') + (up.fileUrl || '');
       } else {
         recordJob(job.id, { status: 'generating' });
-        await realGenerate(job); // throw RESULT_CAPTURE_TODO
+        const items = await realGenerate(job); // chạy thật + gom asset
+        if (stopFlag.gone) { recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
+        recordJob(job.id, { status: 'uploading' });
+        const res = await uploadCapturedItems(job, items);
+        uploaded = res.succeeded; failedNodes = res.failed;
+        if (uploaded === 0) throw Object.assign(new Error('Không có node nào generate thành công.'), { code: 'ALL_FAILED' });
       }
-      if (stopFlag.gone) { log('Job bị server thu hồi giữa chừng — bỏ kết quả.'); recordJob(job.id, { status: 'revoked', finishedAt: Date.now() }); return; }
-      recordJob(job.id, { status: 'uploading' });
-      const up = await uploadResult(job, blob, meta);
-      recordJob(job.id, { status: 'done', finishedAt: Date.now(),
-        resultUrl: state.cfg.serverUrl.replace(/\/+$/, '') + (up.fileUrl || '') });
-      log(`✅ Upload xong job ${shortId} (${(blob.size / 1024).toFixed(1)} KB)`);
+      recordJob(job.id, { status: 'done', finishedAt: Date.now(), resultUrl: singleResultUrl });
+      log(`✅ Upload xong job ${shortId} — ${uploaded} file${failedNodes ? `, ${failedNodes} node lỗi` : ''} (xem trên web UI server)`);
     } catch (e) {
-      if (e.code === 'RESULT_CAPTURE_TODO') {
-        log('Real mode: flow đã build, chờ P1 nối bridge result capture.');
-        await failJob(job, 'RESULT_CAPTURE_TODO', 'Real bridge result capture chưa code (P1). Flow đã build trên canvas.', false);
-        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: 'RESULT_CAPTURE_TODO' });
+      if (e.code === 'HOOK_MISSING') {
+        log('❌ ' + e.message);
+        await failJob(job, 'HOOK_MISSING', e.message, false);
+        recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
       } else {
         log('❌ Lỗi job: ' + e.message);
-        await failJob(job, 'UNKNOWN', e.message || 'worker error', true);
+        await failJob(job, e.code || 'UNKNOWN', e.message || 'worker error', true);
         recordJob(job.id, { status: 'failed', finishedAt: Date.now(), error: e.message });
       }
     } finally {

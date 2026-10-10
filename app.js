@@ -431,6 +431,22 @@
       if(opts&&typeof opts.autoRun==='boolean')$('#jsonAutoRun').checked=opts.autoRun;
       try{buildNodesFromJson();}finally{$('#jsonAutoRun').checked=keepAuto;}
     };
+    // Hook cho worker real-mode: chạy workflow và gom kết quả từng node generate.
+    // Trả về [{nodeId, sceneName, kind, status, error, url, width, height}].
+    // execute() không reject khi lỗi node — node lỗi có status='error'.
+    window.__museflowHooks.runAndCapture=async()=>{
+      await executeWorkflow();
+      const items=[];
+      for(const n of state.nodes){
+        if(!['generateImage','generateVideo'].includes(n.type))continue;
+        const a=n.data.asset||{};
+        items.push({nodeId:n.id,sceneName:n.data.sceneLabel||n.id,
+          kind:n.type==='generateVideo'?'video':'image',
+          status:n.data.status||'idle',error:n.data.error||null,
+          url:a.url||null,width:a.width||null,height:a.height||null});
+      }
+      return items;
+    };
     initWorkerJobsTab();
   }
 
