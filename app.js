@@ -379,6 +379,60 @@
     if(shouldRun)executeWorkflow();
   }
 
+  /* ---- ExtWorker UI (Generation Worker cho rup-video Brain) ---- */
+  function initExtWorkerUI(){
+    if(!window.ExtWorker)return;
+    const W=window.ExtWorker;
+    const logEl=()=>$('#workerLog');
+    W.onLog((line)=>{const el=logEl();if(el){el.value+=line+'\n';el.scrollTop=el.scrollHeight;}});
+    W.init().then((cfg)=>{
+      $('#workerServerUrl').value=cfg.serverUrl||'';
+      $('#workerToken').value=cfg.token||'';
+      $('#workerId').value=cfg.workerId||'';
+      $('#workerSimulate').checked=cfg.simulate!==false;
+      $('#workerPollMs').value=cfg.pollMs||10000;
+      const prev=W.getLog();if(prev.length&&logEl())logEl().value=prev.join('\n')+'\n';
+    });
+    const readForm=()=>({
+      serverUrl:$('#workerServerUrl').value.trim().replace(/\/+$/,''),
+      token:$('#workerToken').value.trim(),
+      workerId:$('#workerId').value.trim()||undefined,
+      simulate:$('#workerSimulate').checked,
+      pollMs:Math.max(3000,parseInt($('#workerPollMs').value,10)||10000),
+    });
+    $('#workerBtn').onclick=()=>{$('#workerModal').classList.remove('hidden');$('#workerStatus').textContent='';};
+    $('#cancelWorker').onclick=()=>{$('#workerModal').classList.add('hidden');};
+    $('#workerModal').onclick=(event)=>{if(event.target.id==='workerModal')$('#workerModal').classList.add('hidden');};
+    $('#workerTestBtn').onclick=async()=>{
+      await W.saveConfig(readForm());
+      $('#workerStatus').textContent='Đang test…';
+      const r=await W.testConnection();
+      $('#workerStatus').textContent=r.msg;
+    };
+    const syncToggle=()=>{$('#workerToggleBtn').textContent=W.isRunning()?'Stop worker':'Start worker';};
+    $('#workerToggleBtn').onclick=async()=>{
+      await W.saveConfig(readForm());
+      if(W.isRunning()){W.stop();}
+      else{
+        $('#workerStatus').textContent='Đang kiểm tra kết nối…';
+        const r=await W.testConnection();
+        if(!r.ok){$('#workerStatus').textContent='Không start được: '+r.msg;return;}
+        $('#workerStatus').textContent=r.msg;
+        if(!W.start()){$('#workerStatus').textContent='Nhập API token trước.';return;}
+      }
+      syncToggle();
+    };
+    syncToggle();
+    // Hook cho worker real-mode: build flow từ job.scene
+    window.__museflowHooks=window.__museflowHooks||{};
+    window.__museflowHooks.buildJsonFlow=(jsonText)=>{
+      $('#jsonInput').value=jsonText;
+      const keepAuto=$('#jsonAutoRun').checked;
+      $('#jsonAutoRun').checked=false; // worker real-mode: build thôi, không auto-run
+      try{buildNodesFromJson();}finally{$('#jsonAutoRun').checked=keepAuto;}
+    };
+  }
+
   function loadJsonFile(file){
     const status=$('#jsonImportStatus');
     if(!file)return;
@@ -1297,6 +1351,7 @@
   $('#jsonFileBtn').onclick=()=>$('#jsonFileInput').click();
   $('#jsonFileInput').onchange=(event)=>{loadJsonFile(event.target.files[0]);event.target.value='';};
   $('#buildJsonNodes').onclick=buildNodesFromJson;
+  initExtWorkerUI();
   $('#scriptModal').onclick=event=>{if(event.target.id==='scriptModal')$('#scriptModal').classList.add('hidden');};
   $('#scriptInput').addEventListener('input',()=>{const count=parseSceneScript($('#scriptInput').value).length;$('#scriptImportStatus').className='';$('#scriptImportStatus').textContent=count?`${count} scene${count===1?'':'s'} detected.`:'';});
   $('#timelineToggleBtn').onclick=toggleTimeline;

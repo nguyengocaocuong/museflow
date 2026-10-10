@@ -13,6 +13,7 @@
     <div class="toolbar-tools" aria-label="Add workflow nodes">
       <button id="scriptImportBtn" type="button">＋ Script → Nodes</button>
       <button id="jsonImportBtn" type="button">＋ JSON → Flow</button>
+      <button id="workerBtn" type="button">🔌 Worker</button>
       <button data-add="prompt">+ Prompt</button>
       <button data-add="text">+ Text note</button>
       <button data-add="negativePrompt">+ Negative</button>
@@ -149,7 +150,41 @@
     </section>
   </div>
 
+  <div id="workerModal" class="modal-backdrop hidden">
+    <section class="modal script-modal" role="dialog" aria-modal="true" aria-labelledby="workerModalTitle">
+      <h2 id="workerModalTitle">Generation Worker — nhận job từ rup-video Brain</h2>
+      <p>Worker poll job <code>muse_generate</code> từ server, generate (hoặc giả lập), rồi upload kết quả về. Session Muse.ai không bao giờ rời máy bạn.</p>
+      <div class="row" style="display:flex;gap:12px">
+        <div style="flex:2">
+          <label for="workerServerUrl">Server URL</label>
+          <input id="workerServerUrl" placeholder="http://127.0.0.1:8765" />
+        </div>
+        <div style="flex:1">
+          <label for="workerId">Worker ID</label>
+          <input id="workerId" />
+        </div>
+      </div>
+      <label for="workerToken">API token</label>
+      <input id="workerToken" type="password" placeholder="dán personal API token" />
+      <div class="row" style="display:flex;gap:12px;margin-top:8px">
+        <label style="flex:1;font-size:12px"><input id="workerSimulate" type="checkbox" checked style="width:auto;margin-right:6px" />Simulate mode (giả lập generate, test vòng tròn)</label>
+        <div style="flex:1"><label for="workerPollMs">Poll mỗi (ms)</label><input id="workerPollMs" type="number" value="10000" min="3000" /></div>
+      </div>
+      <div class="modal-actions" style="justify-content:space-between">
+        <span>
+          <button id="workerTestBtn" type="button">Test connection</button>
+          <button id="workerToggleBtn" type="button" class="primary">Start worker</button>
+        </span>
+        <span><button id="cancelWorker" type="button">Close</button></span>
+      </div>
+      <div id="workerStatus" role="status"></div>
+      <label for="workerLog">Log</label>
+      <textarea id="workerLog" readonly style="height:140px;font-family:monospace;font-size:11px"></textarea>
+    </section>
+  </div>
+
   <script src="vendor/ffmpeg/ffmpeg.js"></script>
+  <script src="ext-worker.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
